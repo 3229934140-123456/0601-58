@@ -232,21 +232,42 @@ router.get('/recommend', optionalAuthMiddleware, (req: AuthRequest, res) => {
 
   const db = getDb();
 
+  let whereSql = 'p.status = ?';
+  const params: any[] = [CONTENT_STATUS.APPROVED];
+
+  if (req.userId) {
+    whereSql += ` AND (
+      p.visibility = ?
+      OR (p.visibility = ? AND p.user_id IN (SELECT following_id FROM follows WHERE follower_id = ?))
+      OR (p.visibility = ? AND p.circle_id IN (SELECT circle_id FROM circle_members WHERE user_id = ? AND status = 1))
+      OR p.user_id = ?
+    )`;
+    params.push(
+      POST_VISIBILITY.PUBLIC,
+      POST_VISIBILITY.FOLLOWERS_ONLY, req.userId,
+      POST_VISIBILITY.CIRCLE_ONLY, req.userId,
+      req.userId
+    );
+  } else {
+    whereSql += ' AND p.visibility = ?';
+    params.push(POST_VISIBILITY.PUBLIC);
+  }
+
   const posts = db.prepare(`
     SELECT p.*, u.username, u.nickname, u.avatar, t.name as topic_name
     FROM posts p
     JOIN users u ON p.user_id = u.id
     LEFT JOIN topics t ON p.topic_id = t.id
-    WHERE p.status = ? AND p.visibility = ?
+    WHERE ${whereSql}
     ORDER BY (p.like_count + p.comment_count * 2 + p.view_count / 10 + p.share_count * 3) DESC, p.created_at DESC
     LIMIT ? OFFSET ?
-  `).all(CONTENT_STATUS.APPROVED, POST_VISIBILITY.PUBLIC, pageSize, offset) as any[];
+  `).all(...params, pageSize, offset) as any[];
 
   let processed = processPostList(posts, req.userId);
   processed = attachUserInteractions(processed, req.userId);
 
-  const total = db.prepare('SELECT COUNT(*) as count FROM posts WHERE status = ? AND visibility = ?')
-    .get(CONTENT_STATUS.APPROVED, POST_VISIBILITY.PUBLIC) as any;
+  const total = db.prepare(`SELECT COUNT(*) as count FROM posts p WHERE ${whereSql}`)
+    .get(...params) as any;
 
   success(res, paginate(processed, total.count, page, pageSize));
 });
@@ -256,14 +277,35 @@ router.get('/hot', optionalAuthMiddleware, (req: AuthRequest, res) => {
 
   const db = getDb();
 
+  let whereSql = 'p.status = ?';
+  const params: any[] = [CONTENT_STATUS.APPROVED];
+
+  if (req.userId) {
+    whereSql += ` AND (
+      p.visibility = ?
+      OR (p.visibility = ? AND p.user_id IN (SELECT following_id FROM follows WHERE follower_id = ?))
+      OR (p.visibility = ? AND p.circle_id IN (SELECT circle_id FROM circle_members WHERE user_id = ? AND status = 1))
+      OR p.user_id = ?
+    )`;
+    params.push(
+      POST_VISIBILITY.PUBLIC,
+      POST_VISIBILITY.FOLLOWERS_ONLY, req.userId,
+      POST_VISIBILITY.CIRCLE_ONLY, req.userId,
+      req.userId
+    );
+  } else {
+    whereSql += ' AND p.visibility = ?';
+    params.push(POST_VISIBILITY.PUBLIC);
+  }
+
   const posts = db.prepare(`
     SELECT p.*, u.username, u.nickname, u.avatar
     FROM posts p
     JOIN users u ON p.user_id = u.id
-    WHERE p.status = ? AND p.visibility = ?
+    WHERE ${whereSql}
     ORDER BY (p.like_count * 3 + p.comment_count * 5 + p.view_count / 100 + p.share_count * 2) DESC
     LIMIT ?
-  `).all(CONTENT_STATUS.APPROVED, POST_VISIBILITY.PUBLIC, pageSize) as any[];
+  `).all(...params, pageSize) as any[];
 
   let processed = processPostList(posts, req.userId);
   processed = attachUserInteractions(processed, req.userId);
@@ -324,9 +366,18 @@ router.post('/unlike/:id', authMiddleware, (req: AuthRequest, res) => {
 
   const db = getDb();
 
-  const post = db.prepare('SELECT id FROM posts WHERE id = ?').get(postId);
+  const post = db.prepare('SELECT id, user_id, status, visibility, circle_id FROM posts WHERE id = ?').get(postId) as any;
   if (!post) {
     return error(res, '动态不存在', 404, 404);
+  }
+
+  if (post.status !== CONTENT_STATUS.APPROVED) {
+    return error(res, '动态不可用');
+  }
+
+  const checkResult = processPostList([{ ...post, username: '', nickname: '', avatar: '' }], req.userId);
+  if (checkResult[0].is_masked) {
+    return error(res, checkResult[0].mask_reason || '无权限操作', 403, 403);
   }
 
   const existingLike = db.prepare('SELECT id FROM post_likes WHERE post_id = ? AND user_id = ?')
@@ -396,9 +447,18 @@ router.post('/uncollect/:id', authMiddleware, (req: AuthRequest, res) => {
 
   const db = getDb();
 
-  const post = db.prepare('SELECT id FROM posts WHERE id = ?').get(postId);
+  const post = db.prepare('SELECT id, user_id, status, visibility, circle_id FROM posts WHERE id = ?').get(postId) as any;
   if (!post) {
     return error(res, '动态不存在', 404, 404);
+  }
+
+  if (post.status !== CONTENT_STATUS.APPROVED) {
+    return error(res, '动态不可用');
+  }
+
+  const checkResult = processPostList([{ ...post, username: '', nickname: '', avatar: '' }], req.userId);
+  if (checkResult[0].is_masked) {
+    return error(res, checkResult[0].mask_reason || '无权限操作', 403, 403);
   }
 
   const existingCollect = db.prepare('SELECT id FROM post_collects WHERE post_id = ? AND user_id = ?')

@@ -3,6 +3,8 @@ import { getDb } from '../database';
 import { success, error, paginate } from '../utils/response';
 import { authMiddleware, AuthRequest, optionalAuthMiddleware } from '../middleware/auth';
 import { config } from '../config';
+import { CONTENT_STATUS, POST_VISIBILITY } from '../constants';
+import { checkPostVisibility } from '../utils/visibility';
 
 const router = Router();
 
@@ -12,6 +14,13 @@ function createNotification(userId: number, type: number, title: string, content
     INSERT INTO notifications (user_id, type, title, content, from_user_id, related_id, related_type)
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(userId, type, title, content, fromUserId || null, relatedId || null, relatedType || null);
+}
+
+function getPostForCheck(postId: number): any {
+  const db = getDb();
+  return db.prepare(`
+    SELECT id, user_id, status, visibility, circle_id FROM posts WHERE id = ?
+  `).get(postId);
 }
 
 router.post('/:postId', authMiddleware, (req: AuthRequest, res) => {
@@ -30,15 +39,23 @@ router.post('/:postId', authMiddleware, (req: AuthRequest, res) => {
 
   const db = getDb();
 
-  const post = db.prepare('SELECT id, user_id FROM posts WHERE id = ? AND status = 0').get(postId) as any;
+  const post = getPostForCheck(postId);
   if (!post) {
     return error(res, '动态不存在', 404, 404);
   }
 
+  const visCheck = checkPostVisibility(post, req.userId);
+  if (!visCheck.visible) {
+    return error(res, visCheck.reason || '无权限评论', 403, 403);
+  }
+
   if (parent_id) {
-    const parent = db.prepare('SELECT id, user_id FROM comments WHERE id = ?').get(parent_id) as any;
+    const parent = db.prepare('SELECT id, user_id, status FROM comments WHERE id = ?').get(parent_id) as any;
     if (!parent) {
       return error(res, '父评论不存在');
+    }
+    if (parent.status !== CONTENT_STATUS.APPROVED && parent.user_id !== req.userId) {
+      return error(res, '父评论不可用');
     }
   }
 
@@ -83,19 +100,29 @@ router.get('/list/:postId', optionalAuthMiddleware, (req: AuthRequest, res) => {
 
   const db = getDb();
 
+  const post = getPostForCheck(postId);
+  if (!post) {
+    return error(res, '动态不存在', 404, 404);
+  }
+
+  const visCheck = checkPostVisibility(post, req.userId);
+  if (!visCheck.visible) {
+    return error(res, visCheck.reason || '无权限查看', 403, 403);
+  }
+
   const comments = db.prepare(`
     SELECT c.*, u.username, u.nickname, u.avatar,
            ru.nickname as reply_to_nickname
     FROM comments c
     JOIN users u ON c.user_id = u.id
     LEFT JOIN users ru ON c.reply_to_user_id = ru.id
-    WHERE c.post_id = ? AND c.status = 0 AND c.parent_id IS NULL
+    WHERE c.post_id = ? AND c.status = ? AND c.parent_id IS NULL
     ORDER BY c.created_at DESC
     LIMIT ? OFFSET ?
-  `).all(postId, pageSize, offset) as any[];
+  `).all(postId, CONTENT_STATUS.APPROVED, pageSize, offset) as any[];
 
-  const total = db.prepare('SELECT COUNT(*) as count FROM comments WHERE post_id = ? AND status = 0 AND parent_id IS NULL')
-    .get(postId) as any;
+  const total = db.prepare('SELECT COUNT(*) as count FROM comments WHERE post_id = ? AND status = ? AND parent_id IS NULL')
+    .get(postId, CONTENT_STATUS.APPROVED) as any;
 
   success(res, paginate(comments, total.count, page, pageSize));
 });
@@ -112,19 +139,34 @@ router.get('/replies/:commentId', optionalAuthMiddleware, (req: AuthRequest, res
 
   const db = getDb();
 
+  const comment = db.prepare('SELECT id, post_id, status, user_id FROM comments WHERE id = ?').get(commentId) as any;
+  if (!comment) {
+    return error(res, '评论不存在', 404, 404);
+  }
+
+  const post = getPostForCheck(comment.post_id);
+  if (!post) {
+    return error(res, '动态不存在', 404, 404);
+  }
+
+  const visCheck = checkPostVisibility(post, req.userId);
+  if (!visCheck.visible) {
+    return error(res, visCheck.reason || '无权限查看', 403, 403);
+  }
+
   const replies = db.prepare(`
     SELECT c.*, u.username, u.nickname, u.avatar,
            ru.nickname as reply_to_nickname
     FROM comments c
     JOIN users u ON c.user_id = u.id
     LEFT JOIN users ru ON c.reply_to_user_id = ru.id
-    WHERE c.parent_id = ? AND c.status = 0
+    WHERE c.parent_id = ? AND c.status = ?
     ORDER BY c.created_at ASC
     LIMIT ? OFFSET ?
-  `).all(commentId, pageSize, offset) as any[];
+  `).all(commentId, CONTENT_STATUS.APPROVED, pageSize, offset) as any[];
 
-  const total = db.prepare('SELECT COUNT(*) as count FROM comments WHERE parent_id = ? AND status = 0')
-    .get(commentId) as any;
+  const total = db.prepare('SELECT COUNT(*) as count FROM comments WHERE parent_id = ? AND status = ?')
+    .get(commentId, CONTENT_STATUS.APPROVED) as any;
 
   success(res, paginate(replies, total.count, page, pageSize));
 });
@@ -137,12 +179,20 @@ router.post('/like/:commentId', authMiddleware, (req: AuthRequest, res) => {
 
   const db = getDb();
 
-  const comment = db.prepare('SELECT id, status FROM comments WHERE id = ?').get(commentId) as any;
+  const comment = db.prepare('SELECT id, status, post_id FROM comments WHERE id = ?').get(commentId) as any;
   if (!comment) {
     return error(res, '评论不存在', 404, 404);
   }
-  if (comment.status !== 0) {
+  if (comment.status !== CONTENT_STATUS.APPROVED) {
     return error(res, '评论不可用');
+  }
+
+  const post = getPostForCheck(comment.post_id);
+  if (post) {
+    const visCheck = checkPostVisibility(post, req.userId);
+    if (!visCheck.visible) {
+      return error(res, visCheck.reason || '无权限操作', 403, 403);
+    }
   }
 
   const existingLike = db.prepare('SELECT id FROM comment_likes WHERE comment_id = ? AND user_id = ?')
@@ -172,9 +222,17 @@ router.post('/unlike/:commentId', authMiddleware, (req: AuthRequest, res) => {
 
   const db = getDb();
 
-  const comment = db.prepare('SELECT id FROM comments WHERE id = ?').get(commentId);
+  const comment = db.prepare('SELECT id, status, post_id FROM comments WHERE id = ?').get(commentId) as any;
   if (!comment) {
     return error(res, '评论不存在', 404, 404);
+  }
+
+  const post = getPostForCheck(comment.post_id);
+  if (post) {
+    const visCheck = checkPostVisibility(post, req.userId);
+    if (!visCheck.visible) {
+      return error(res, visCheck.reason || '无权限操作', 403, 403);
+    }
   }
 
   const existingLike = db.prepare('SELECT id FROM comment_likes WHERE comment_id = ? AND user_id = ?')
@@ -217,6 +275,36 @@ router.delete('/:commentId', authMiddleware, (req: AuthRequest, res) => {
   db.prepare('UPDATE posts SET comment_count = comment_count - 1 WHERE id = ?').run(comment.post_id);
 
   success(res, null, '删除成功');
+});
+
+router.get('/mine', authMiddleware, (req: AuthRequest, res) => {
+  const page = parseInt(req.query.page as string) || 1;
+  const pageSize = parseInt(req.query.pageSize as string) || config.pageSize;
+  const offset = (page - 1) * pageSize;
+  const status = req.query.status !== undefined ? parseInt(req.query.status as string) : null;
+
+  const db = getDb();
+
+  let whereClause = 'WHERE c.user_id = ?';
+  const params: any[] = [req.userId];
+
+  if (status !== null) {
+    whereClause += ' AND c.status = ?';
+    params.push(status);
+  }
+
+  const comments = db.prepare(`
+    SELECT c.*, p.content as post_content_preview
+    FROM comments c
+    JOIN posts p ON c.post_id = p.id
+    ${whereClause}
+    ORDER BY c.created_at DESC
+    LIMIT ? OFFSET ?
+  `).all(...params, pageSize, offset);
+
+  const total = db.prepare(`SELECT COUNT(*) as count FROM comments c ${whereClause}`).get(...params) as any;
+
+  success(res, paginate(comments, total.count, page, pageSize));
 });
 
 export default router;

@@ -100,12 +100,42 @@ router.post('/report/handle/:id', authMiddleware, (req: AuthRequest, res) => {
   success(res, null, '处理成功');
 });
 
+router.get('/stats', authMiddleware, (req: AuthRequest, res) => {
+  const db = getDb();
+  if (!isAdmin(req.userId!)) return error(res, '无权限访问', 403, 403);
+
+  const pendingPosts = db.prepare('SELECT COUNT(*) as count FROM posts WHERE status = ?')
+    .get(CONTENT_STATUS.PENDING) as any;
+  const pendingComments = db.prepare('SELECT COUNT(*) as count FROM comments WHERE status = ?')
+    .get(CONTENT_STATUS.PENDING) as any;
+  const pendingReports = db.prepare('SELECT COUNT(*) as count FROM reports WHERE status = 0')
+    .get() as any;
+  const rejectedPosts = db.prepare('SELECT COUNT(*) as count FROM posts WHERE status = ?')
+    .get(CONTENT_STATUS.REJECTED) as any;
+  const rejectedComments = db.prepare('SELECT COUNT(*) as count FROM comments WHERE status = ?')
+    .get(CONTENT_STATUS.REJECTED) as any;
+  const approvedToday = db.prepare(`SELECT COUNT(*) as count FROM posts WHERE status = ? AND updated_at >= datetime('now', '-1 day')`)
+    .get(CONTENT_STATUS.APPROVED) as any;
+
+  success(res, {
+    pending_posts: pendingPosts.count,
+    pending_comments: pendingComments.count,
+    pending_reports: pendingReports.count,
+    rejected_posts: rejectedPosts.count,
+    rejected_comments: rejectedComments.count,
+    approved_today: approvedToday.count,
+  });
+});
+
 router.get('/posts', authMiddleware, (req: AuthRequest, res) => {
   const page = parseInt(req.query.page as string) || 1;
   const pageSize = parseInt(req.query.pageSize as string) || config.pageSize;
   const offset = (page - 1) * pageSize;
   const status = req.query.status !== undefined ? parseInt(req.query.status as string) : null;
   const keyword = req.query.keyword as string;
+  const user_id = req.query.user_id ? parseInt(req.query.user_id as string) : null;
+  const start_date = req.query.start_date as string;
+  const end_date = req.query.end_date as string;
 
   const db = getDb();
   if (!isAdmin(req.userId!)) return error(res, '无权限访问', 403, 403);
@@ -120,6 +150,18 @@ router.get('/posts', authMiddleware, (req: AuthRequest, res) => {
   if (keyword && keyword.trim()) {
     whereClauses.push('p.content LIKE ?');
     params.push(`%${keyword.trim()}%`);
+  }
+  if (user_id) {
+    whereClauses.push('p.user_id = ?');
+    params.push(user_id);
+  }
+  if (start_date) {
+    whereClauses.push('p.created_at >= ?');
+    params.push(start_date);
+  }
+  if (end_date) {
+    whereClauses.push('p.created_at <= ?');
+    params.push(end_date + ' 23:59:59');
   }
 
   const whereClause = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
@@ -187,12 +229,72 @@ router.post('/review/post/:postId', authMiddleware, (req: AuthRequest, res) => {
   success(res, null, '审核完成');
 });
 
+router.post('/review/posts/batch', authMiddleware, (req: AuthRequest, res) => {
+  const { ids, status, review_reason } = req.body;
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return error(res, '请选择要审核的动态');
+  }
+  if (status === undefined || isNaN(parseInt(status))) {
+    return error(res, '请选择审核结果');
+  }
+  if (ids.length > 100) {
+    return error(res, '批量审核最多100条');
+  }
+
+  const db = getDb();
+  if (!isAdmin(req.userId!)) return error(res, '无权限操作', 403, 403);
+
+  const statusVal = parseInt(status);
+  const placeholders = ids.map(() => '?').join(',');
+
+  const posts = db.prepare(`
+    SELECT id, user_id FROM posts WHERE id IN (${placeholders})
+  `).all(...ids) as any[];
+
+  if (posts.length === 0) {
+    return error(res, '没有找到要审核的动态');
+  }
+
+  const tx = db.transaction(() => {
+    const updateStmt = db.prepare('UPDATE posts SET status = ?, review_reason = ? WHERE id = ?');
+    const notifStmt = db.prepare(`
+      INSERT INTO notifications (user_id, type, title, content, related_id, related_type)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+
+    for (const post of posts) {
+      updateStmt.run(statusVal, review_reason || null, post.id);
+
+      if (statusVal === CONTENT_STATUS.REJECTED) {
+        notifStmt.run(
+          post.user_id,
+          3,
+          '动态审核未通过',
+          `您的动态因「${review_reason || '违反社区规范'}」未通过审核`,
+          post.id,
+          'post'
+        );
+      } else if (statusVal === CONTENT_STATUS.APPROVED) {
+        notifStmt.run(post.user_id, 3, '动态审核通过', '您的动态已通过审核', post.id, 'post');
+      }
+    }
+  });
+  tx();
+
+  success(res, { count: posts.length }, `批量审核完成，共处理 ${posts.length} 条动态`);
+});
+
 router.get('/comments', authMiddleware, (req: AuthRequest, res) => {
   const page = parseInt(req.query.page as string) || 1;
   const pageSize = parseInt(req.query.pageSize as string) || config.pageSize;
   const offset = (page - 1) * pageSize;
   const status = req.query.status !== undefined ? parseInt(req.query.status as string) : null;
   const keyword = req.query.keyword as string;
+  const user_id = req.query.user_id ? parseInt(req.query.user_id as string) : null;
+  const post_id = req.query.post_id ? parseInt(req.query.post_id as string) : null;
+  const start_date = req.query.start_date as string;
+  const end_date = req.query.end_date as string;
 
   const db = getDb();
   if (!isAdmin(req.userId!)) return error(res, '无权限访问', 403, 403);
@@ -207,6 +309,22 @@ router.get('/comments', authMiddleware, (req: AuthRequest, res) => {
   if (keyword && keyword.trim()) {
     whereClauses.push('c.content LIKE ?');
     params.push(`%${keyword.trim()}%`);
+  }
+  if (user_id) {
+    whereClauses.push('c.user_id = ?');
+    params.push(user_id);
+  }
+  if (post_id) {
+    whereClauses.push('c.post_id = ?');
+    params.push(post_id);
+  }
+  if (start_date) {
+    whereClauses.push('c.created_at >= ?');
+    params.push(start_date);
+  }
+  if (end_date) {
+    whereClauses.push('c.created_at <= ?');
+    params.push(end_date + ' 23:59:59');
   }
 
   const whereClause = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
@@ -262,6 +380,60 @@ router.post('/review/comment/:commentId', authMiddleware, (req: AuthRequest, res
   tx();
 
   success(res, null, '审核完成');
+});
+
+router.post('/review/comments/batch', authMiddleware, (req: AuthRequest, res) => {
+  const { ids, status, review_reason } = req.body;
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return error(res, '请选择要审核的评论');
+  }
+  if (status === undefined || isNaN(parseInt(status))) {
+    return error(res, '请选择审核结果');
+  }
+  if (ids.length > 100) {
+    return error(res, '批量审核最多100条');
+  }
+
+  const db = getDb();
+  if (!isAdmin(req.userId!)) return error(res, '无权限操作', 403, 403);
+
+  const statusVal = parseInt(status);
+  const placeholders = ids.map(() => '?').join(',');
+
+  const comments = db.prepare(`
+    SELECT id, user_id FROM comments WHERE id IN (${placeholders})
+  `).all(...ids) as any[];
+
+  if (comments.length === 0) {
+    return error(res, '没有找到要审核的评论');
+  }
+
+  const tx = db.transaction(() => {
+    const updateStmt = db.prepare('UPDATE comments SET status = ?, review_reason = ? WHERE id = ?');
+    const notifStmt = db.prepare(`
+      INSERT INTO notifications (user_id, type, title, content, related_id, related_type)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+
+    for (const comment of comments) {
+      updateStmt.run(statusVal, review_reason || null, comment.id);
+
+      if (statusVal === CONTENT_STATUS.REJECTED) {
+        notifStmt.run(
+          comment.user_id,
+          3,
+          '评论审核未通过',
+          `您的评论因「${review_reason || '违反社区规范'}」未通过审核`,
+          comment.id,
+          'comment'
+        );
+      }
+    }
+  });
+  tx();
+
+  success(res, { count: comments.length }, `批量审核完成，共处理 ${comments.length} 条评论`);
 });
 
 router.post('/ban/user/:userId', authMiddleware, (req: AuthRequest, res) => {
@@ -350,16 +522,32 @@ router.put('/announcement/:id', authMiddleware, (req: AuthRequest, res) => {
   const announcement = db.prepare('SELECT id FROM announcements WHERE id = ?').get(id);
   if (!announcement) return error(res, '公告不存在');
 
-  db.prepare(`
-    UPDATE announcements SET title = ?, content = ?, type = ?, status = ?
-    WHERE id = ?
-  `).run(
-    title !== undefined ? title.trim() : undefined,
-    content !== undefined ? content : undefined,
-    type !== undefined ? type : undefined,
-    status !== undefined ? parseInt(status) : undefined,
-    id
-  );
+  const fields: string[] = [];
+  const params: any[] = [];
+
+  if (title !== undefined) {
+    fields.push('title = ?');
+    params.push(title.trim());
+  }
+  if (content !== undefined) {
+    fields.push('content = ?');
+    params.push(content);
+  }
+  if (type !== undefined) {
+    fields.push('type = ?');
+    params.push(type);
+  }
+  if (status !== undefined) {
+    fields.push('status = ?');
+    params.push(parseInt(status));
+  }
+
+  if (fields.length === 0) {
+    return error(res, '没有需要更新的字段');
+  }
+
+  params.push(id);
+  db.prepare(`UPDATE announcements SET ${fields.join(', ')} WHERE id = ?`).run(...params);
 
   success(res, null, '公告更新成功');
 });
@@ -400,27 +588,35 @@ router.get('/announcements', optionalAuthMiddleware, (req: AuthRequest, res) => 
   const page = parseInt(req.query.page as string) || 1;
   const pageSize = parseInt(req.query.pageSize as string) || config.pageSize;
   const offset = (page - 1) * pageSize;
-  const adminView = req.query.admin === '1';
+  const status = req.query.status !== undefined ? parseInt(req.query.status as string) : null;
 
   const db = getDb();
-  let statusFilter = 'a.status = ?';
-  let statusVal = ANNOUNCEMENT_STATUS.PUBLISHED;
+  const isAdminUser = req.userId && isAdmin(req.userId);
 
-  if (adminView && req.userId && isAdmin(req.userId)) {
-    statusFilter = '1 = 1';
+  const whereClauses: string[] = [];
+  const params: any[] = [];
+
+  if (!isAdminUser) {
+    whereClauses.push('a.status = ?');
+    params.push(ANNOUNCEMENT_STATUS.PUBLISHED);
+  } else if (status !== null) {
+    whereClauses.push('a.status = ?');
+    params.push(status);
   }
+
+  const whereClause = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
 
   const announcements = db.prepare(`
     SELECT a.*, u.nickname as publisher_name
     FROM announcements a
     LEFT JOIN users u ON a.publisher_id = u.id
-    WHERE ${statusFilter}
+    ${whereClause}
     ORDER BY a.created_at DESC
     LIMIT ? OFFSET ?
-  `).all(...(adminView && req.userId && isAdmin(req.userId) ? [] : [statusVal]), pageSize, offset);
+  `).all(...params, pageSize, offset);
 
-  const total = db.prepare(`SELECT COUNT(*) as count FROM announcements a WHERE ${statusFilter}`)
-    .get(...(adminView && req.userId && isAdmin(req.userId) ? [] : [statusVal])) as any;
+  const total = db.prepare(`SELECT COUNT(*) as count FROM announcements a ${whereClause}`)
+    .get(...params) as any;
 
   success(res, paginate(announcements, total.count, page, pageSize));
 });
@@ -445,6 +641,38 @@ router.get('/announcement/:id', optionalAuthMiddleware, (req: AuthRequest, res) 
   }
 
   success(res, announcement);
+});
+
+router.post('/recount/follows', authMiddleware, (req: AuthRequest, res) => {
+  const db = getDb();
+  if (!isAdmin(req.userId!)) return error(res, '无权限操作', 403, 403);
+
+  const tx = db.transaction(() => {
+    const userIds = db.prepare('SELECT id FROM users').all() as any[];
+
+    for (const user of userIds) {
+      const followerCount = db.prepare('SELECT COUNT(*) as count FROM follows WHERE following_id = ?')
+        .get(user.id) as any;
+      const followingCount = db.prepare('SELECT COUNT(*) as count FROM follows WHERE follower_id = ?')
+        .get(user.id) as any;
+
+      db.prepare('UPDATE users SET follower_count = ?, following_count = ? WHERE id = ?')
+        .run(followerCount.count, followingCount.count, user.id);
+    }
+
+    const postCounts = db.prepare(`
+      SELECT user_id, COUNT(*) as count FROM posts WHERE status = ? GROUP BY user_id
+    `).all(CONTENT_STATUS.APPROVED) as any[];
+
+    db.prepare('UPDATE users SET post_count = 0').run();
+    for (const row of postCounts) {
+      db.prepare('UPDATE users SET post_count = ? WHERE id = ?').run(row.count, row.user_id);
+    }
+  });
+  tx();
+
+  const totalUsers = db.prepare('SELECT COUNT(*) as count FROM users').get() as any;
+  success(res, { user_count: totalUsers.count }, '关注计数和动态计数已重新校准');
 });
 
 export default router;
