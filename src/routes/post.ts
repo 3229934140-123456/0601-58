@@ -329,9 +329,9 @@ router.post('/like/:id', authMiddleware, (req: AuthRequest, res) => {
     return error(res, '动态不可用');
   }
 
-  const checkResult = processPostList([{ ...post, username: '', nickname: '', avatar: '' }], req.userId);
-  if (checkResult[0].is_masked) {
-    return error(res, checkResult[0].mask_reason || '无权限操作', 403, 403);
+  const visibilityCheck = checkPostVisibility(post, req.userId);
+  if (!visibilityCheck.visible) {
+    return error(res, visibilityCheck.reason || '无权限操作', 403, 403);
   }
 
   const existingLike = db.prepare('SELECT id FROM post_likes WHERE post_id = ? AND user_id = ?')
@@ -375,9 +375,9 @@ router.post('/unlike/:id', authMiddleware, (req: AuthRequest, res) => {
     return error(res, '动态不可用');
   }
 
-  const checkResult = processPostList([{ ...post, username: '', nickname: '', avatar: '' }], req.userId);
-  if (checkResult[0].is_masked) {
-    return error(res, checkResult[0].mask_reason || '无权限操作', 403, 403);
+  const visibilityCheck = checkPostVisibility(post, req.userId);
+  if (!visibilityCheck.visible) {
+    return error(res, visibilityCheck.reason || '无权限操作', 403, 403);
   }
 
   const existingLike = db.prepare('SELECT id FROM post_likes WHERE post_id = ? AND user_id = ?')
@@ -407,7 +407,7 @@ router.post('/collect/:id', authMiddleware, (req: AuthRequest, res) => {
 
   const db = getDb();
 
-  const post = db.prepare('SELECT id, status, visibility, circle_id FROM posts WHERE id = ?').get(postId) as any;
+  const post = db.prepare('SELECT id, user_id, status, visibility, circle_id FROM posts WHERE id = ?').get(postId) as any;
   if (!post) {
     return error(res, '动态不存在', 404, 404);
   }
@@ -415,9 +415,9 @@ router.post('/collect/:id', authMiddleware, (req: AuthRequest, res) => {
     return error(res, '动态不可用');
   }
 
-  const checkResult = processPostList([{ ...post, username: '', nickname: '', avatar: '', user_id: post.user_id }], req.userId);
-  if (checkResult[0].is_masked) {
-    return error(res, checkResult[0].mask_reason || '无权限操作', 403, 403);
+  const visibilityCheck = checkPostVisibility(post, req.userId);
+  if (!visibilityCheck.visible) {
+    return error(res, visibilityCheck.reason || '无权限操作', 403, 403);
   }
 
   const existingCollect = db.prepare('SELECT id FROM post_collects WHERE post_id = ? AND user_id = ?')
@@ -456,9 +456,9 @@ router.post('/uncollect/:id', authMiddleware, (req: AuthRequest, res) => {
     return error(res, '动态不可用');
   }
 
-  const checkResult = processPostList([{ ...post, username: '', nickname: '', avatar: '' }], req.userId);
-  if (checkResult[0].is_masked) {
-    return error(res, checkResult[0].mask_reason || '无权限操作', 403, 403);
+  const visibilityCheck = checkPostVisibility(post, req.userId);
+  if (!visibilityCheck.visible) {
+    return error(res, visibilityCheck.reason || '无权限操作', 403, 403);
   }
 
   const existingCollect = db.prepare('SELECT id FROM post_collects WHERE post_id = ? AND user_id = ?')
@@ -524,9 +524,9 @@ router.post('/share/:id', authMiddleware, (req: AuthRequest, res) => {
     return error(res, '动态不存在', 404, 404);
   }
 
-  const checkResult = processPostList([{ ...originalPost, username: '', nickname: '', avatar: '' }], req.userId);
-  if (checkResult[0].is_masked) {
-    return error(res, checkResult[0].mask_reason || '无权限操作', 403, 403);
+  const visibilityCheck = checkPostVisibility(originalPost, req.userId);
+  if (!visibilityCheck.visible) {
+    return error(res, visibilityCheck.reason || '无权限操作', 403, 403);
   }
 
   if (originalPost.status !== CONTENT_STATUS.APPROVED) {

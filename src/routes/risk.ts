@@ -53,20 +53,53 @@ router.get('/report/list', authMiddleware, (req: AuthRequest, res) => {
   const page = parseInt(req.query.page as string) || 1;
   const pageSize = parseInt(req.query.pageSize as string) || config.pageSize;
   const offset = (page - 1) * pageSize;
-  const status = req.query.status ? parseInt(req.query.status as string) : null;
+  const status = req.query.status !== undefined ? parseInt(req.query.status as string) : null;
+  const reporter_id = req.query.reporter_id ? parseInt(req.query.reporter_id as string) : null;
+  const target_type = req.query.target_type ? parseInt(req.query.target_type as string) : null;
+  const target_id = req.query.target_id ? parseInt(req.query.target_id as string) : null;
+  const start_date = req.query.start_date as string;
+  const end_date = req.query.end_date as string;
+  const keyword = req.query.keyword as string;
 
   const db = getDb();
   if (!isAdmin(req.userId!)) return error(res, '无权限访问', 403, 403);
 
-  let whereClause = '';
+  const whereClauses: string[] = [];
   const params: any[] = [];
+
   if (status !== null) {
-    whereClause = 'WHERE r.status = ?';
+    whereClauses.push('r.status = ?');
     params.push(status);
   }
+  if (reporter_id) {
+    whereClauses.push('r.reporter_id = ?');
+    params.push(reporter_id);
+  }
+  if (target_type) {
+    whereClauses.push('r.target_type = ?');
+    params.push(target_type);
+  }
+  if (target_id) {
+    whereClauses.push('r.target_id = ?');
+    params.push(target_id);
+  }
+  if (start_date) {
+    whereClauses.push('r.created_at >= ?');
+    params.push(start_date);
+  }
+  if (end_date) {
+    whereClauses.push('r.created_at <= ?');
+    params.push(end_date + ' 23:59:59');
+  }
+  if (keyword && keyword.trim()) {
+    whereClauses.push('(r.reason LIKE ? OR r.description LIKE ? OR u.nickname LIKE ?)');
+    params.push(`%${keyword.trim()}%`, `%${keyword.trim()}%`, `%${keyword.trim()}%`);
+  }
+
+  const whereClause = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
 
   const reports = db.prepare(`
-    SELECT r.*, u.nickname as reporter_name
+    SELECT r.*, u.nickname as reporter_name, u.avatar as reporter_avatar
     FROM reports r
     JOIN users u ON r.reporter_id = u.id
     ${whereClause}
@@ -74,7 +107,7 @@ router.get('/report/list', authMiddleware, (req: AuthRequest, res) => {
     LIMIT ? OFFSET ?
   `).all(...params, pageSize, offset);
 
-  const total = db.prepare(`SELECT COUNT(*) as count FROM reports r ${whereClause}`)
+  const total = db.prepare(`SELECT COUNT(*) as count FROM reports r JOIN users u ON r.reporter_id = u.id ${whereClause}`)
     .get(...params) as any;
 
   success(res, paginate(reports, total.count, page, pageSize));
@@ -98,6 +131,47 @@ router.post('/report/handle/:id', authMiddleware, (req: AuthRequest, res) => {
   `).run(status !== undefined ? status : 1, handle_note || null, req.userId, reportId);
 
   success(res, null, '处理成功');
+});
+
+router.post('/report/batch', authMiddleware, (req: AuthRequest, res) => {
+  const { ids, status, handle_note } = req.body;
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return error(res, '请选择要处理的举报');
+  }
+  if (status === undefined || isNaN(parseInt(status))) {
+    return error(res, '请选择处理结果');
+  }
+  if (ids.length > 100) {
+    return error(res, '批量处理最多100条');
+  }
+
+  const db = getDb();
+  if (!isAdmin(req.userId!)) return error(res, '无权限操作', 403, 403);
+
+  const statusVal = parseInt(status);
+  const placeholders = ids.map(() => '?').join(',');
+
+  const reports = db.prepare(`
+    SELECT id FROM reports WHERE id IN (${placeholders})
+  `).all(...ids) as any[];
+
+  if (reports.length === 0) {
+    return error(res, '没有找到要处理的举报');
+  }
+
+  const tx = db.transaction(() => {
+    const stmt = db.prepare(`
+      UPDATE reports SET status = ?, handle_note = ?, handler_id = ?, handled_at = datetime('now')
+      WHERE id = ?
+    `);
+    for (const report of reports) {
+      stmt.run(statusVal, handle_note || null, req.userId, report.id);
+    }
+  });
+  tx();
+
+  success(res, { count: reports.length }, `批量处理完成，共处理 ${reports.length} 条举报`);
 });
 
 router.get('/stats', authMiddleware, (req: AuthRequest, res) => {
@@ -125,6 +199,197 @@ router.get('/stats', authMiddleware, (req: AuthRequest, res) => {
     rejected_comments: rejectedComments.count,
     approved_today: approvedToday.count,
   });
+});
+
+router.get('/todo', authMiddleware, (req: AuthRequest, res) => {
+  const page = parseInt(req.query.page as string) || 1;
+  const pageSize = parseInt(req.query.pageSize as string) || config.pageSize;
+  const itemType = req.query.type as string || 'all';
+  const status = req.query.status !== undefined ? parseInt(req.query.status as string) : null;
+  const user_id = req.query.user_id ? parseInt(req.query.user_id as string) : null;
+  const start_date = req.query.start_date as string;
+  const end_date = req.query.end_date as string;
+  const keyword = req.query.keyword as string;
+
+  const db = getDb();
+  if (!isAdmin(req.userId!)) return error(res, '无权限访问', 403, 403);
+
+  const whereClauses: string[] = [];
+  const params: any[] = [];
+
+  if (status !== null) {
+    whereClauses.push('status = ?');
+    params.push(status);
+  }
+  if (user_id) {
+    whereClauses.push('user_id = ?');
+    params.push(user_id);
+  }
+  if (start_date) {
+    whereClauses.push('created_at >= ?');
+    params.push(start_date);
+  }
+  if (end_date) {
+    whereClauses.push('created_at <= ?');
+    params.push(end_date + ' 23:59:59');
+  }
+  if (keyword && keyword.trim()) {
+    whereClauses.push('content LIKE ?');
+    params.push(`%${keyword.trim()}%`);
+  }
+
+  const whereClause = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
+  const allItems: any[] = [];
+
+  if (itemType === 'all' || itemType === 'post') {
+    const postWhere = whereClause.replace(/user_id = \?/g, 'p.user_id = ?')
+      .replace(/status = \?/g, 'p.status = ?')
+      .replace(/created_at >= \?/g, 'p.created_at >= ?')
+      .replace(/created_at <= \?/g, 'p.created_at <= ?')
+      .replace(/content LIKE \?/g, 'p.content LIKE ?');
+
+    const posts = db.prepare(`
+      SELECT p.id, p.user_id, p.content, p.status, p.created_at, p.images,
+             u.username, u.nickname, u.avatar
+      FROM posts p
+      JOIN users u ON p.user_id = u.id
+      ${postWhere}
+      ORDER BY p.created_at DESC
+    `).all(...params) as any[];
+
+    for (const post of posts) {
+      let contentPreview = post.content || '';
+      if (post.images && typeof post.images === 'string') {
+        try {
+          const imgs = JSON.parse(post.images);
+          if (imgs && imgs.length > 0) {
+            contentPreview = contentPreview || `[${imgs.length}张图片]`;
+          }
+        } catch (e) {}
+      }
+      allItems.push({
+        id: post.id,
+        item_type: 'post',
+        type_name: '动态',
+        content: contentPreview.substring(0, 100),
+        status: post.status,
+        status_text: post.status === 0 ? '已通过' : post.status === 1 ? '待审核' : '已拒绝',
+        user_id: post.user_id,
+        username: post.username,
+        nickname: post.nickname,
+        avatar: post.avatar,
+        created_at: post.created_at,
+        extra: {},
+      });
+    }
+  }
+
+  if (itemType === 'all' || itemType === 'comment') {
+    const commentWhere = whereClause.replace(/user_id = \?/g, 'c.user_id = ?')
+      .replace(/status = \?/g, 'c.status = ?')
+      .replace(/created_at >= \?/g, 'c.created_at >= ?')
+      .replace(/created_at <= \?/g, 'c.created_at <= ?')
+      .replace(/content LIKE \?/g, 'c.content LIKE ?');
+
+    const comments = db.prepare(`
+      SELECT c.id, c.user_id, c.content, c.status, c.created_at, c.post_id,
+             u.username, u.nickname, u.avatar,
+             p.content as post_content_preview
+      FROM comments c
+      JOIN users u ON c.user_id = u.id
+      LEFT JOIN posts p ON c.post_id = p.id
+      ${commentWhere}
+      ORDER BY c.created_at DESC
+    `).all(...params) as any[];
+
+    for (const comment of comments) {
+      allItems.push({
+        id: comment.id,
+        item_type: 'comment',
+        type_name: '评论',
+        content: (comment.content || '').substring(0, 100),
+        status: comment.status,
+        status_text: comment.status === 0 ? '已通过' : comment.status === 1 ? '待审核' : '已拒绝',
+        user_id: comment.user_id,
+        username: comment.username,
+        nickname: comment.nickname,
+        avatar: comment.avatar,
+        created_at: comment.created_at,
+        extra: {
+          post_id: comment.post_id,
+          post_content_preview: (comment.post_content_preview || '').substring(0, 50),
+        },
+      });
+    }
+  }
+
+  if (itemType === 'all' || itemType === 'report') {
+    const reportWhereClauses: string[] = [];
+    const reportParams: any[] = [];
+
+    if (status !== null) {
+      reportWhereClauses.push('r.status = ?');
+      reportParams.push(status);
+    }
+    if (user_id) {
+      reportWhereClauses.push('r.reporter_id = ?');
+      reportParams.push(user_id);
+    }
+    if (start_date) {
+      reportWhereClauses.push('r.created_at >= ?');
+      reportParams.push(start_date);
+    }
+    if (end_date) {
+      reportWhereClauses.push('r.created_at <= ?');
+      reportParams.push(end_date + ' 23:59:59');
+    }
+    if (keyword && keyword.trim()) {
+      reportWhereClauses.push('(r.reason LIKE ? OR r.description LIKE ? OR u.nickname LIKE ?)');
+      reportParams.push(`%${keyword.trim()}%`, `%${keyword.trim()}%`, `%${keyword.trim()}%`);
+    }
+
+    const reportWhere = reportWhereClauses.length > 0 ? 'WHERE ' + reportWhereClauses.join(' AND ') : '';
+
+    const reports = db.prepare(`
+      SELECT r.id, r.reporter_id, r.reason, r.description, r.status, r.created_at,
+             r.target_type, r.target_id,
+             u.nickname as reporter_name, u.avatar as reporter_avatar
+      FROM reports r
+      JOIN users u ON r.reporter_id = u.id
+      ${reportWhere}
+      ORDER BY r.created_at DESC
+    `).all(...reportParams) as any[];
+
+    for (const report of reports) {
+      const targetTypeNames: Record<number, string> = { 1: '动态', 2: '用户', 3: '评论' };
+      allItems.push({
+        id: report.id,
+        item_type: 'report',
+        type_name: '举报',
+        content: report.reason + (report.description ? '：' + report.description : ''),
+        status: report.status,
+        status_text: report.status === 0 ? '待处理' : report.status === 1 ? '已通过' : '已拒绝',
+        user_id: report.reporter_id,
+        username: report.reporter_name,
+        nickname: report.reporter_name,
+        avatar: report.reporter_avatar,
+        created_at: report.created_at,
+        extra: {
+          target_type: report.target_type,
+          target_type_name: targetTypeNames[report.target_type] || '未知',
+          target_id: report.target_id,
+        },
+      });
+    }
+  }
+
+  allItems.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+  const total = allItems.length;
+  const offset = (page - 1) * pageSize;
+  const list = allItems.slice(offset, offset + pageSize);
+
+  success(res, paginate(list, total, page, pageSize));
 });
 
 router.get('/posts', authMiddleware, (req: AuthRequest, res) => {
@@ -211,7 +476,7 @@ router.post('/review/post/:postId', authMiddleware, (req: AuthRequest, res) => {
         VALUES (?, ?, ?, ?, ?, ?)
       `).run(
         post.user_id,
-        3,
+        5,
         '动态审核未通过',
         `您的动态因「${review_reason || '违反社区规范'}」未通过审核`,
         postId,
@@ -221,7 +486,7 @@ router.post('/review/post/:postId', authMiddleware, (req: AuthRequest, res) => {
       db.prepare(`
         INSERT INTO notifications (user_id, type, title, content, related_id, related_type)
         VALUES (?, ?, ?, ?, ?, ?)
-      `).run(post.user_id, 3, '动态审核通过', '您的动态已通过审核', postId, 'post');
+      `).run(post.user_id, 5, '动态审核通过', '您的动态已通过审核', postId, 'post');
     }
   });
   tx();
@@ -269,14 +534,14 @@ router.post('/review/posts/batch', authMiddleware, (req: AuthRequest, res) => {
       if (statusVal === CONTENT_STATUS.REJECTED) {
         notifStmt.run(
           post.user_id,
-          3,
+          5,
           '动态审核未通过',
           `您的动态因「${review_reason || '违反社区规范'}」未通过审核`,
           post.id,
           'post'
         );
       } else if (statusVal === CONTENT_STATUS.APPROVED) {
-        notifStmt.run(post.user_id, 3, '动态审核通过', '您的动态已通过审核', post.id, 'post');
+        notifStmt.run(post.user_id, 5, '动态审核通过', '您的动态已通过审核', post.id, 'post');
       }
     }
   });
@@ -369,12 +634,17 @@ router.post('/review/comment/:commentId', authMiddleware, (req: AuthRequest, res
         VALUES (?, ?, ?, ?, ?, ?)
       `).run(
         comment.user_id,
-        3,
+        5,
         '评论审核未通过',
         `您的评论因「${review_reason || '违反社区规范'}」未通过审核`,
         commentId,
         'comment'
       );
+    } else if (statusVal === CONTENT_STATUS.APPROVED) {
+      db.prepare(`
+        INSERT INTO notifications (user_id, type, title, content, related_id, related_type)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(comment.user_id, 5, '评论审核通过', '您的评论已通过审核', commentId, 'comment');
     }
   });
   tx();
@@ -422,12 +692,14 @@ router.post('/review/comments/batch', authMiddleware, (req: AuthRequest, res) =>
       if (statusVal === CONTENT_STATUS.REJECTED) {
         notifStmt.run(
           comment.user_id,
-          3,
+          5,
           '评论审核未通过',
           `您的评论因「${review_reason || '违反社区规范'}」未通过审核`,
           comment.id,
           'comment'
         );
+      } else if (statusVal === CONTENT_STATUS.APPROVED) {
+        notifStmt.run(comment.user_id, 5, '评论审核通过', '您的评论已通过审核', comment.id, 'comment');
       }
     }
   });
