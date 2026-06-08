@@ -6,42 +6,6 @@ import { config } from '../config';
 
 const router = Router();
 
-router.get('/:id', optionalAuthMiddleware, (req: AuthRequest, res) => {
-  const userId = parseInt(req.params.id);
-  if (isNaN(userId)) {
-    return error(res, '无效的用户ID');
-  }
-
-  const db = getDb();
-  const user = db.prepare(`
-    SELECT id, username, nickname, avatar, bio, gender, birthday, location,
-           follower_count, following_count, post_count, created_at
-    FROM users WHERE id = ? AND status = 0
-  `).get(userId) as any;
-
-  if (!user) {
-    return error(res, '用户不存在', 404, 404);
-  }
-
-  let isFollowing = false;
-  let isBlocked = false;
-  if (req.userId && req.userId !== userId) {
-    const follow = db.prepare('SELECT id FROM follows WHERE follower_id = ? AND following_id = ?')
-      .get(req.userId, userId);
-    isFollowing = !!follow;
-
-    const block = db.prepare('SELECT id FROM blocks WHERE user_id = ? AND blocked_user_id = ?')
-      .get(req.userId, userId);
-    isBlocked = !!block;
-  }
-
-  success(res, {
-    ...user,
-    is_following: isFollowing,
-    is_blocked: isBlocked,
-  });
-});
-
 router.put('/profile', authMiddleware, (req: AuthRequest, res) => {
   const { nickname, avatar, bio, gender, birthday, location, email, phone } = req.body;
 
@@ -114,19 +78,42 @@ router.post('/block/:userId', authMiddleware, (req: AuthRequest, res) => {
     return error(res, '用户不存在', 404, 404);
   }
 
-  try {
+  const alreadyBlocked = db.prepare('SELECT id FROM blocks WHERE user_id = ? AND blocked_user_id = ?')
+    .get(req.userId, blockedUserId);
+  if (alreadyBlocked) {
+    return success(res, { is_blocked: true }, '已在黑名单中');
+  }
+
+  const dbTx = db.transaction(() => {
     db.prepare('INSERT INTO blocks (user_id, blocked_user_id) VALUES (?, ?)')
       .run(req.userId, blockedUserId);
 
-    db.prepare('DELETE FROM follows WHERE follower_id = ? AND following_id = ?')
-      .run(req.userId, blockedUserId);
-    db.prepare('DELETE FROM follows WHERE follower_id = ? AND following_id = ?')
-      .run(blockedUserId, req.userId);
+    const follow1 = db.prepare('SELECT id FROM follows WHERE follower_id = ? AND following_id = ?')
+      .get(req.userId, blockedUserId);
+    if (follow1) {
+      db.prepare('DELETE FROM follows WHERE follower_id = ? AND following_id = ?')
+        .run(req.userId, blockedUserId);
+      db.prepare('UPDATE users SET following_count = following_count - 1 WHERE id = ?')
+        .run(req.userId!);
+      db.prepare('UPDATE users SET follower_count = follower_count - 1 WHERE id = ?')
+        .run(blockedUserId);
+    }
 
-    success(res, null, '拉黑成功');
-  } catch (e) {
-    success(res, null, '已在黑名单中');
-  }
+    const follow2 = db.prepare('SELECT id FROM follows WHERE follower_id = ? AND following_id = ?')
+      .get(blockedUserId, req.userId);
+    if (follow2) {
+      db.prepare('DELETE FROM follows WHERE follower_id = ? AND following_id = ?')
+        .run(blockedUserId, req.userId!);
+      db.prepare('UPDATE users SET following_count = following_count - 1 WHERE id = ?')
+        .run(blockedUserId);
+      db.prepare('UPDATE users SET follower_count = follower_count - 1 WHERE id = ?')
+        .run(req.userId!);
+    }
+  });
+
+  dbTx();
+
+  success(res, { is_blocked: true }, '拉黑成功');
 });
 
 router.post('/unblock/:userId', authMiddleware, (req: AuthRequest, res) => {
@@ -136,10 +123,14 @@ router.post('/unblock/:userId', authMiddleware, (req: AuthRequest, res) => {
   }
 
   const db = getDb();
-  db.prepare('DELETE FROM blocks WHERE user_id = ? AND blocked_user_id = ?')
+  const result = db.prepare('DELETE FROM blocks WHERE user_id = ? AND blocked_user_id = ?')
     .run(req.userId!, blockedUserId);
 
-  success(res, null, '取消拉黑成功');
+  if (result.changes === 0) {
+    return success(res, { is_blocked: false }, '不在黑名单中');
+  }
+
+  success(res, { is_blocked: false }, '取消拉黑成功');
 });
 
 router.get('/blocks/list', authMiddleware, (req: AuthRequest, res) => {
@@ -162,6 +153,42 @@ router.get('/blocks/list', authMiddleware, (req: AuthRequest, res) => {
     .get(req.userId) as any;
 
   success(res, paginate(blocks, total.count, page, pageSize));
+});
+
+router.get('/:id', optionalAuthMiddleware, (req: AuthRequest, res) => {
+  const userId = parseInt(req.params.id);
+  if (isNaN(userId)) {
+    return error(res, '无效的用户ID');
+  }
+
+  const db = getDb();
+  const user = db.prepare(`
+    SELECT id, username, nickname, avatar, bio, gender, birthday, location,
+           follower_count, following_count, post_count, created_at
+    FROM users WHERE id = ? AND status = 0
+  `).get(userId) as any;
+
+  if (!user) {
+    return error(res, '用户不存在', 404, 404);
+  }
+
+  let isFollowing = false;
+  let isBlocked = false;
+  if (req.userId && req.userId !== userId) {
+    const follow = db.prepare('SELECT id FROM follows WHERE follower_id = ? AND following_id = ?')
+      .get(req.userId, userId);
+    isFollowing = !!follow;
+
+    const block = db.prepare('SELECT id FROM blocks WHERE user_id = ? AND blocked_user_id = ?')
+      .get(req.userId, userId);
+    isBlocked = !!block;
+  }
+
+  success(res, {
+    ...user,
+    is_following: isFollowing,
+    is_blocked: isBlocked,
+  });
 });
 
 export default router;

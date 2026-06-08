@@ -3,6 +3,8 @@ import { getDb } from '../database';
 import { success, error, paginate } from '../utils/response';
 import { authMiddleware, AuthRequest, optionalAuthMiddleware } from '../middleware/auth';
 import { config } from '../config';
+import { processPostList, attachUserInteractions } from '../utils/visibility';
+import { CONTENT_STATUS, POST_VISIBILITY } from '../constants';
 
 const router = Router();
 
@@ -42,18 +44,15 @@ router.get('/all', optionalAuthMiddleware, (req: AuthRequest, res) => {
       FROM posts p
       JOIN users u ON p.user_id = u.id
       LEFT JOIN topics t ON p.topic_id = t.id
-      WHERE p.status = 0 AND p.visibility = 0
+      WHERE p.status = ?
         AND (p.content LIKE ?)
       ORDER BY p.created_at DESC
       LIMIT ?
-    `).all(`%${keyword}%`, pageSize);
+    `).all(CONTENT_STATUS.APPROVED, `%${keyword}%`, pageSize);
 
-    posts.forEach((post: any) => {
-      if (post.images) {
-        post.images = JSON.parse(post.images);
-      }
-    });
-    results.posts = posts;
+    let processed = processPostList(posts, req.userId);
+    processed = attachUserInteractions(processed, req.userId);
+    results.posts = processed;
   }
 
   if (type === 'all' || type === 'topic') {
@@ -136,24 +135,21 @@ router.get('/posts', optionalAuthMiddleware, (req: AuthRequest, res) => {
     FROM posts p
     JOIN users u ON p.user_id = u.id
     LEFT JOIN topics t ON p.topic_id = t.id
-    WHERE p.status = 0 AND p.visibility = 0
+    WHERE p.status = ?
       AND p.content LIKE ?
     ORDER BY p.created_at DESC
     LIMIT ? OFFSET ?
-  `).all(`%${keyword}%`, pageSize, offset) as any[];
+  `).all(CONTENT_STATUS.APPROVED, `%${keyword}%`, pageSize, offset) as any[];
 
-  posts.forEach(post => {
-    if (post.images) {
-      post.images = JSON.parse(post.images);
-    }
-  });
+  let processed = processPostList(posts, req.userId);
+  processed = attachUserInteractions(processed, req.userId);
 
   const total = db.prepare(`
     SELECT COUNT(*) as count FROM posts
-    WHERE status = 0 AND visibility = 0 AND content LIKE ?
-  `).get(`%${keyword}%`) as any;
+    WHERE status = ? AND content LIKE ?
+  `).get(CONTENT_STATUS.APPROVED, `%${keyword}%`) as any;
 
-  success(res, paginate(posts, total.count, page, pageSize));
+  success(res, paginate(processed, total.count, page, pageSize));
 });
 
 router.get('/history', authMiddleware, (req: AuthRequest, res) => {

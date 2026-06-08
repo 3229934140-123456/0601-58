@@ -77,6 +77,7 @@ export function initDatabase(): void {
       collect_count INTEGER DEFAULT 0,
       view_count INTEGER DEFAULT 0,
       status INTEGER DEFAULT 0,
+      review_reason TEXT,
       is_top INTEGER DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now')),
@@ -113,6 +114,7 @@ export function initDatabase(): void {
       reply_to_user_id INTEGER,
       like_count INTEGER DEFAULT 0,
       status INTEGER DEFAULT 0,
+      review_reason TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       FOREIGN KEY (post_id) REFERENCES posts(id),
       FOREIGN KEY (user_id) REFERENCES users(id)
@@ -220,6 +222,7 @@ export function initDatabase(): void {
       description TEXT,
       status INTEGER DEFAULT 0,
       handler_id INTEGER,
+      handle_note TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       FOREIGN KEY (reporter_id) REFERENCES users(id)
     );
@@ -264,5 +267,36 @@ export function initDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(to_user_id, is_read);
   `);
 
+  migrateDatabase(database);
+
   console.log('Database initialized successfully.');
+}
+
+function migrateDatabase(db: Database.Database): void {
+  const columns = db.pragma('table_info(posts)') as any[];
+  const hasReviewReason = columns.some((c: any) => c.name === 'review_reason');
+  if (!hasReviewReason) {
+    db.exec('ALTER TABLE posts ADD COLUMN review_reason TEXT');
+    console.log('Migration: added review_reason to posts');
+  }
+
+  const commentColumns = db.pragma('table_info(comments)') as any[];
+  const hasCommentReviewReason = commentColumns.some((c: any) => c.name === 'review_reason');
+  if (!hasCommentReviewReason) {
+    db.exec('ALTER TABLE comments ADD COLUMN review_reason TEXT');
+    console.log('Migration: added review_reason to comments');
+  }
+
+  const reportColumns = db.pragma('table_info(reports)') as any[];
+  const hasHandleNote = reportColumns.some((c: any) => c.name === 'handle_note');
+  if (!hasHandleNote) {
+    db.exec('ALTER TABLE reports ADD COLUMN handle_note TEXT');
+    console.log('Migration: added handle_note to reports');
+  }
+
+  const hasHandledAt = reportColumns.some((c: any) => c.name === 'handled_at');
+  if (!hasHandledAt) {
+    db.exec('ALTER TABLE reports ADD COLUMN handled_at TEXT');
+    console.log('Migration: added handled_at to reports');
+  }
 }

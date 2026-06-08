@@ -137,20 +137,31 @@ router.post('/like/:commentId', authMiddleware, (req: AuthRequest, res) => {
 
   const db = getDb();
 
-  const comment = db.prepare('SELECT id FROM comments WHERE id = ? AND status = 0').get(commentId);
+  const comment = db.prepare('SELECT id, status FROM comments WHERE id = ?').get(commentId) as any;
   if (!comment) {
     return error(res, '评论不存在', 404, 404);
   }
+  if (comment.status !== 0) {
+    return error(res, '评论不可用');
+  }
 
-  try {
+  const existingLike = db.prepare('SELECT id FROM comment_likes WHERE comment_id = ? AND user_id = ?')
+    .get(commentId, req.userId);
+
+  if (existingLike) {
+    const current = db.prepare('SELECT like_count FROM comments WHERE id = ?').get(commentId) as any;
+    return success(res, { is_liked: true, like_count: current.like_count }, '已点赞');
+  }
+
+  const dbTx = db.transaction(() => {
     db.prepare('INSERT INTO comment_likes (comment_id, user_id) VALUES (?, ?)')
       .run(commentId, req.userId);
     db.prepare('UPDATE comments SET like_count = like_count + 1 WHERE id = ?').run(commentId);
+  });
+  dbTx();
 
-    success(res, { is_liked: true }, '点赞成功');
-  } catch (e) {
-    success(res, { is_liked: true }, '已点赞');
-  }
+  const current = db.prepare('SELECT like_count FROM comments WHERE id = ?').get(commentId) as any;
+  success(res, { is_liked: true, like_count: current.like_count }, '点赞成功');
 });
 
 router.post('/unlike/:commentId', authMiddleware, (req: AuthRequest, res) => {
@@ -160,14 +171,29 @@ router.post('/unlike/:commentId', authMiddleware, (req: AuthRequest, res) => {
   }
 
   const db = getDb();
-  const result = db.prepare('DELETE FROM comment_likes WHERE comment_id = ? AND user_id = ?')
-    .run(commentId, req.userId);
 
-  if (result.changes > 0) {
-    db.prepare('UPDATE comments SET like_count = like_count - 1 WHERE id = ?').run(commentId);
+  const comment = db.prepare('SELECT id FROM comments WHERE id = ?').get(commentId);
+  if (!comment) {
+    return error(res, '评论不存在', 404, 404);
   }
 
-  success(res, { is_liked: false }, '取消点赞成功');
+  const existingLike = db.prepare('SELECT id FROM comment_likes WHERE comment_id = ? AND user_id = ?')
+    .get(commentId, req.userId);
+
+  if (!existingLike) {
+    const current = db.prepare('SELECT like_count FROM comments WHERE id = ?').get(commentId) as any;
+    return success(res, { is_liked: false, like_count: current.like_count }, '未点赞');
+  }
+
+  const dbTx = db.transaction(() => {
+    db.prepare('DELETE FROM comment_likes WHERE comment_id = ? AND user_id = ?')
+      .run(commentId, req.userId);
+    db.prepare('UPDATE comments SET like_count = like_count - 1 WHERE id = ?').run(commentId);
+  });
+  dbTx();
+
+  const current = db.prepare('SELECT like_count FROM comments WHERE id = ?').get(commentId) as any;
+  success(res, { is_liked: false, like_count: current.like_count }, '取消点赞成功');
 });
 
 router.delete('/:commentId', authMiddleware, (req: AuthRequest, res) => {
