@@ -256,6 +256,35 @@ export function initDatabase(): void {
       created_at TEXT DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS appeals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      target_type INTEGER NOT NULL,
+      target_id INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      description TEXT,
+      status INTEGER DEFAULT 0,
+      handler_id INTEGER,
+      handle_note TEXT,
+      handled_at TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS moderation_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      operator_id INTEGER NOT NULL,
+      action_type INTEGER NOT NULL,
+      target_type INTEGER NOT NULL,
+      target_id INTEGER NOT NULL,
+      target_summary TEXT,
+      old_status INTEGER,
+      new_status INTEGER,
+      note TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (operator_id) REFERENCES users(id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_posts_user_id ON posts(user_id);
     CREATE INDEX IF NOT EXISTS idx_posts_created_at ON posts(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_posts_topic_id ON posts(topic_id);
@@ -265,6 +294,9 @@ export function initDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_follows_following ON follows(following_id);
     CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, is_read);
     CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(to_user_id, is_read);
+    CREATE INDEX IF NOT EXISTS idx_mod_logs_operator ON moderation_logs(operator_id);
+    CREATE INDEX IF NOT EXISTS idx_mod_logs_action ON moderation_logs(action_type);
+    CREATE INDEX IF NOT EXISTS idx_appeals_status ON appeals(status);
   `);
 
   migrateDatabase(database);

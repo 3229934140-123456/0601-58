@@ -33,6 +33,28 @@ export const REPORT_TARGET_TYPE = {
 
 export const REPORT_STATUS = {
   PENDING: 0,
-  PROCESSED: 1,
+  APPROVED: 1,
   REJECTED: 2,
+} as const;
+
+export const APPEAL_STATUS = {
+  PENDING: 0,
+  APPROVED: 1,
+  REJECTED: 2,
+} as const;
+
+export const APPEAL_TARGET_TYPE = {
+  POST: 1,
+  COMMENT: 2,
+} as const;
+
+export const MOD_LOG_TYPE = {
+  POST_REVIEW: 1,
+  COMMENT_REVIEW: 2,
+  REPORT_HANDLE: 3,
+  USER_BAN: 4,
+  USER_UNBAN: 5,
+  ANNOUNCEMENT_PUBLISH: 6,
+  ANNOUNCEMENT_OFFLINE: 7,
+  APPEAL_HANDLE: 8,
 } as const;
